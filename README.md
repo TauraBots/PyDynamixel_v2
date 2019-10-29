@@ -3,6 +3,10 @@ Python interface to the Dynamixel protocol. Supports both Protocols 1 and 2 usin
 
 Default is MX-28 control table.
 
+This version is simpler than the one present on the 'more_robust' branch. 
+
+Check which version suits your usage.
+
 ## Requirements
 PySerial:
 ```
