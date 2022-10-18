@@ -10,21 +10,27 @@ from dynamixel_sdk import *
 from math import pi
 import sys
 
+OPERATING_MODE                  = 1 
 PROTOCOL_VERSION                = 2
 
-# MX-28 table
+# MX-64 table
 if PROTOCOL_VERSION == 1:
     ADDR_MX_TORQUE_ENABLE       = 24    # Address for torque enable
     ADDR_MX_PRESENT_POSITION    = 36    # Address for the current position
     ADDR_MX_GOAL_POSITION       = 30    # Address for goal position
     LEN_MX_GOAL_POSITION        = 2     # MX's have different message lengths in Protocol 1 vs. 2
                                         # and protocol 1.0 does not use present_position length
-elif PROTOCOL_VERSION == 2:
+elif PROTOCOL_VERSION == 2: 
     ADDR_MX_TORQUE_ENABLE       = 64    # Address for torque enable
     ADDR_MX_PRESENT_POSITION    = 132   # Address for the current position
     ADDR_MX_GOAL_POSITION       = 116   # Address for goal position
+    ADDR_MX_GOAL_VELOCITY       = 104
+    ADDR_MX_PRESENT_VELOCITY    = 128 
     LEN_MX_GOAL_POSITION        = 4
     LEN_MX_PRESENT_POSITION     = 4
+    LEN_MX_GOAL_VELOCITY        = 4
+    LEN_MX_PRESENT_VELOCITY     = 4 
+
 
 
 class DxlComm(object):
@@ -73,8 +79,16 @@ class DxlComm(object):
         # Instantiates sync read and write variables
         if PROTOCOL_VERSION == 2:
             # Sync Read is only present in Protocol 2.0
-            self.group_sync_read = GroupSyncRead(self.port_handler, self.packet_handler, ADDR_MX_PRESENT_POSITION, LEN_MX_PRESENT_POSITION)
-        self.group_sync_write = GroupSyncWrite(self.port_handler, self.packet_handler, ADDR_MX_GOAL_POSITION, LEN_MX_GOAL_POSITION)
+            if OPERATING_MODE == 0:
+                self.group_sync_read = GroupSyncRead(self.port_handler, self.packet_handler, ADDR_MX_PRESENT_POSITION, LEN_MX_PRESENT_POSITION)
+            elif OPERATING_MODE ==1:
+                self.group_sync_read = GroupSyncRead(self.port_handler, self.packet_handler, ADDR_MX_PRESENT_VELOCITY, LEN_MX_PRESENT_VELOCITY)
+        if OPERATING_MODE == 0:
+            self.group_sync_write = GroupSyncWrite(self.port_handler, self.packet_handler, ADDR_MX_GOAL_POSITION, LEN_MX_GOAL_POSITION)
+        elif OPERATING_MODE == 1:
+            self.group_sync_write = GroupSyncWrite(self.port_handler, self.packet_handler, ADDR_MX_GOAL_VELOCITY, LEN_MX_GOAL_VELOCITY)
+
+
 
     def attach_joints(self, joints):
         ''' This method attaches a list of joints so that
@@ -154,6 +168,21 @@ class DxlComm(object):
             else:
                 print("Make sure the values parameter is a list of the same length of connected dynamixels.")
 
+    def send_velocity(self, values=None):
+        if values == None:
+            ch_joints = [j for j in self.joints if j.changed is True]
+            self._sync_write(servos=ch_joints)
+
+            for i in ch_joints:
+                i.changed = False
+        else:
+            if isinstance(values, dict): #this needs further checking
+                list_values = [values[i] for i in sorted(values)] # sort dict by joint id
+                if len(list_values) == len(self.joint_ids):
+                    # list_values is sorted as is serial.joint_ids (from lowest to highest id)
+                    self._sync_write(values=list_values)
+            else:
+                print("Make sure the values parameter is a list of the same length of connected dynamixels.")
 
     def _sync_write(self, servos=None, values=None, radian=False):
         ''' this is an adaptation from dynamixel's sdk for
@@ -191,6 +220,16 @@ class DxlComm(object):
             for joint in self.joints:
                 joint.get_angle(radian=radian)
 
+    def get_velocity(self):
+        if PROTOCOL_VERSION == 2:
+            servos_velocity = self._sync_read(ADDR_MX_PRESENT_VELOCITY, LEN_MX_PRESENT_VELOCITY)
+            return servos_velocity
+        else:
+            for joint in self.joints:
+                joint.get_velocity()
+
+                
+
     def _sync_read(self, addr, info_len, radian=False):
         ''' Sync read. Only available in Protocol 2.0
         '''
@@ -209,25 +248,25 @@ class DxlComm(object):
 
             # check if sync read data from each dynamixel is available
             # then, get save that data
-            servos_position = {}
+            servos_data = {}
             for i, servo_id in enumerate(self.joint_ids):
                 dxl_getdata_result = self.group_sync_read.isAvailable(servo_id, addr, info_len)
                 if dxl_getdata_result != True:
                     print("[ID:0%3d] groupSyncRead getdata failed." % servo_id)
                 else:
-                    dxl_present_position = self.group_sync_read.getData(servo_id, addr, info_len)
+                    dxl_present_data = self.group_sync_read.getData(servo_id, addr, info_len)
                     # put the returned value into a dict with all values and in the joints curr_value variable
                     if radian:
-                        present_angle = (pi*dxl_present_position)/2048.0
+                        present_data = (pi*dxl_present_data)/2048.0
                     else:
-                        present_angle = (180*dxl_present_position)/2048.0
-                    servos_position[servo_id] = present_angle
-                    self.joints[i].curr_value = present_angle
+                        present_data = dxl_present_data
+                    servos_data[servo_id] = present_data
+                    self.joints[i].curr_value = present_data
 
             self.group_sync_read.clearParam()
 
             # return the dict
-            return servos_position
+            return servos_data
         else:
             print("Sync Read is only available in Protocol 2.0.")
             return False
@@ -251,7 +290,7 @@ class DxlComm(object):
         if radian:
             goal_value = int(2048.0*angle/pi)
         else:
-            goal_value = int(2048.0*angle/180)
+            goal_value = int(angle)
         return goal_value
 
     def release(self):
@@ -261,11 +300,10 @@ class DxlComm(object):
         '''
         self.port_handler.closePort()
 
-class Joint(object):
+class BaseDynamixel(object):
     ''' This class represents a single Dynamixel servo motor.
     Contains functions to ping, reboot, get angles and send angles to the dynamixel.
     '''
-
     def __init__(self, servo_id, center_value=0):
         ''' The constructor takes the servo id
         as the argument. Argument center_value
@@ -275,7 +313,9 @@ class Joint(object):
         self.servo_id = servo_id
         self.center_value = center_value
         self.goal_angle = -1
+        self.goal_velocity = 0
 
+    
     def _set_port_and_packet(self, port_handler, packet_handler):
         ''' This sets this joint's packet and port handlers to be equal to DxlComm ones.
         These variables are used to communicate with dynamixel.
@@ -283,6 +323,62 @@ class Joint(object):
         self.packet_handler = packet_handler
         self.port_handler = port_handler
 
+    def enable_torque(self):
+        ''' Enables torque in this joint
+        Usage: self.enable_torque()
+        '''
+        dxl_comm_result, dxl_error = self.packet_handler.write1ByteTxRx(self.port_handler, self.servo_id, ADDR_MX_TORQUE_ENABLE, 1)
+        if dxl_comm_result != COMM_SUCCESS:
+            print("%s" % self.packet_handler.getTxRxResult(dxl_comm_result))
+        elif dxl_error != 0:
+            print("%s" % self.packet_handler.getRxPacketError(dxl_error))
+
+    def disable_torque(self):
+        ''' Disables torque in this joint
+        Usage:
+            self.disable_torque()
+        '''
+        dxl_comm_result, dxl_error = self.packet_handler.write1ByteTxRx(self.port_handler, self.servo_id, ADDR_MX_TORQUE_ENABLE, 0)
+
+        if dxl_comm_result != COMM_SUCCESS:
+            print("%s" % self.packet_handler.getTxRxResult(dxl_comm_result))
+        elif dxl_error != 0:
+            print("%s" % self.packet_handler.getRxPacketError(dxl_error))
+
+    def ping(self): # check
+        ''' Ping this joint.
+        Usage:
+            self.ping()
+        '''
+        dxl_model_number, dxl_comm_result, dxl_error = self.packet_handler.ping(self.port_handler, self.servo_id)
+        if dxl_comm_result != COMM_SUCCESS:
+            print("%s" % self.packet_handler.getTxRxResult(dxl_comm_result))
+        elif dxl_error != 0:
+            print("%s" % self.packet_handler.getRxPacketError(dxl_error))
+        else:
+            print("[ID: %03d] ping succeeded. Model number: %d" % (self.servo_id, dxl_model_number))
+            return self.servo_id
+
+    def reboot(self): # check
+        ''' Reboots this joint.
+        Only works in Protocol 2.0.
+        Usage:
+            self.reboot()
+        '''
+        if PROTOCOL_VERSION == 2:
+            dxl_comm_result, dxl_error = self.packet_handler.reboot(self.port_handler, self.servo_id)
+            if dxl_comm_result != COMM_SUCCESS:
+                print("%s" % self.packet_handler.getTxRxResult(dxl_comm_result))
+            elif dxl_error != 0:
+                print("%s" % self.packet_handler.getRxPacketError(dxl_error))
+            else:
+                print("[ID: %03d] reboot succeeded" % self.servo_id)
+        else:
+            print("Reboot is only present in Protocol 2.0.")
+    
+
+class Joint(BaseDynamixel):
+    ''' Using Position Control Mode '''
     def set_goal_value(self, angle, radian=False):
         '''Sets goal value (0 to 1024), from given goal angle.
         Usage:
@@ -342,55 +438,54 @@ class Joint(object):
 
         return self.curr_angle
 
-    def enable_torque(self):
-        ''' Enables torque in this joint
-        Usage: self.enable_torque()
+class Wheel(BaseDynamixel):
+    ''' Using Velocity Control Mode '''
+    def set_goal_velocity(self, rpm):
+        '''Sets goal velocity (-234 to 234), from given goal angle.
+        Usage:
+            set_goal_velocity(5) -> rpm (revolutions per minute)
         '''
-        dxl_comm_result, dxl_error = self.packet_handler.write1ByteTxRx(self.port_handler, self.servo_id, ADDR_MX_TORQUE_ENABLE, 1)
+        self.goal_velocity = float(rpm)
+        self.goal_velocity = int(rpm/0.229)
+        self.changed = True
+
+    def send_velocity(self, rpm):
+        ''' Sends a command to this specific servomotor to set
+        its goal velocity from a rpm value
+        Usage:
+            send_velocity(5) -> sends 5 rpm velocity
+            OR
+            set_goal_velocity(5)
+        '''
+        #if rpm >= 0:
+        self.set_goal_velocity(rpm)
+        dxl_comm_result, dxl_error = self.packet_handler.write4ByteTxRx(self.port_handler, self.servo_id, ADDR_MX_GOAL_VELOCITY, self.goal_velocity)
+
         if dxl_comm_result != COMM_SUCCESS:
             print("%s" % self.packet_handler.getTxRxResult(dxl_comm_result))
-        elif dxl_error != 0:
+        elif dxl_error:
             print("%s" % self.packet_handler.getRxPacketError(dxl_error))
+        # precisa fazer changed = false?
 
-    def disable_torque(self):
-        ''' Disables torque in this joint
-        Usage:
-            self.disable_torque()
+    def get_velocity(self):
+        ''' Reads the current velocity of this
+        servomotor alone. The read velocity is
+        stored in self.curr_velocity and self.curr_value.
+        However, only self.curr_velocity is retorned by this function.
         '''
-        dxl_comm_result, dxl_error = self.packet_handler.write1ByteTxRx(self.port_handler, self.servo_id, ADDR_MX_TORQUE_ENABLE, 0)
+        if PROTOCOL_VERSION == 1:
+            self.curr_value, dxl_comm_result, dxl_error = self.packet_handler.read2ByteTxRx(self.port_handler, self.servo_id, ADDR_MX_PRESENT_VELOCITY)
+        elif PROTOCOL_VERSION == 2:
+            self.curr_value, dxl_comm_result, dxl_error = self.packet_handler.read4ByteTxRx(self.port_handler, self.servo_id, ADDR_MX_PRESENT_VELOCITY)
+
+        #self.curr_value -= self.center_value #TODO implement this in other functions
 
         if dxl_comm_result != COMM_SUCCESS:
             print("%s" % self.packet_handler.getTxRxResult(dxl_comm_result))
-        elif dxl_error != 0:
+        elif dxl_error:
             print("%s" % self.packet_handler.getRxPacketError(dxl_error))
 
-    def ping(self): # check
-        ''' Ping this joint.
-        Usage:
-            self.ping()
-        '''
-        dxl_model_number, dxl_comm_result, dxl_error = self.packet_handler.ping(self.port_handler, self.servo_id)
-        if dxl_comm_result != COMM_SUCCESS:
-            print("%s" % self.packet_handler.getTxRxResult(dxl_comm_result))
-        elif dxl_error != 0:
-            print("%s" % self.packet_handler.getRxPacketError(dxl_error))
-        else:
-            print("[ID: %03d] ping succeeded. Model number: %d" % (self.servo_id, dxl_model_number))
-            return self.servo_id
+        self.curr_velocity = self.curr_value * 0.229
 
-    def reboot(self): # check
-        ''' Reboots this joint.
-        Only works in Protocol 2.0.
-        Usage:
-            self.reboot()
-        '''
-        if PROTOCOL_VERSION == 2:
-            dxl_comm_result, dxl_error = self.packet_handler.reboot(self.port_handler, self.servo_id)
-            if dxl_comm_result != COMM_SUCCESS:
-                print("%s" % self.packet_handler.getTxRxResult(dxl_comm_result))
-            elif dxl_error != 0:
-                print("%s" % self.packet_handler.getRxPacketError(dxl_error))
-            else:
-                print("[ID: %03d] reboot succeeded" % self.servo_id)
-        else:
-            print("Reboot is only present in Protocol 2.0.")
+        return self.curr_velocity
+    
